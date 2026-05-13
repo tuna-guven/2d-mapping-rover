@@ -1,59 +1,71 @@
-use std::net::UdpSocket;
 use std::str;
+use tokio::net::UdpSocket;
 
+#[derive(Debug)]
 struct SlamPayload {
-    base_x: f32, // The position of the rover in the world coordinate system x
-    base_y: f32, // The position of the rover in the world coordinate system y
-    heading: f32, // The orientation of the rover in the world coordinate system
-    scan_angle: f32, // The angle of the laser scan relative to the rover
-    scan_dist: f32, // The distance of the laser scan
+    base_x: f32,
+    base_y: f32,
+    heading: f32,
+    scan_angle: f32,
+    scan_dist: f32,
 }
 
+fn parse_payload(raw: &str) -> Option<SlamPayload> {
+    let mut parts = raw.split(',');
 
-fn parse(raw: &str) -> Option<SlamPayload> {    // parsers the raw string slam payload into a SlamPayload struct
-    let parts: Vec<&str> = raw.trim().split(',').collect();
+    let payload = SlamPayload {
+        base_x: parts.next()?.trim().parse().ok()?,
+        base_y: parts.next()?.trim().parse().ok()?,
+        heading: parts.next()?.trim().parse().ok()?,
+        scan_angle: parts.next()?.trim().parse().ok()?,
+        scan_dist: parts.next()?.trim().parse().ok()?,
+    };
 
-    if parts.len() != 5 {
+    // Reject the packet if there is trailing garbage data (more than 5 parts)
+    if parts.next().is_some() {
         return None;
     }
 
-    Some(SlamPayload {
-        base_x:     parts[0].trim().parse().ok()?,
-        base_y:     parts[1].trim().parse().ok()?,
-        heading:    parts[2].trim().parse().ok()?,
-        scan_angle: parts[3].trim().parse().ok()?,
-        scan_dist:  parts[4].trim().parse().ok()?,
-    })
+    Some(payload)
 }
 
-fn main() {
-    let socket = UdpSocket::bind("0.0.0.0:5000")
-        .expect("Failed to bind UDP port");
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let socket = match UdpSocket::bind("0.0.0.0:4210").await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to bind to UDP port: {}", e);
+            return Err(e);
+        }
+    };
 
-    println!("Listening on port 5000...");
+    println!("✅ Listening for high-speed rover telemetry on UDP port 4210...");
 
     let mut buf = [0u8; 1024];
 
     loop {
-        match socket.recv_from(&mut buf) {
+        match socket.recv_from(&mut buf).await {
             Ok((len, src)) => {
-                match str::from_utf8(&buf[..len]) {
-                    Ok(raw) => {
-                        match parse(raw) {
-                            Some(payload) => println!(
-                                "[{}] x={} y={} heading={} angle={} dist={}",
-                                src,
-                                payload.base_x, payload.base_y,
-                                payload.heading, payload.scan_angle,
+                if let Ok(raw_str) = str::from_utf8(&buf[..len]) {
+                    match parse_payload(raw_str) {
+                        Some(payload) => {
+                            println!(
+                                "[{}] x: {}, y: {}, heading: {}, angle: {}, dist: {}", 
+                                src, 
+                                payload.base_x, 
+                                payload.base_y, 
+                                payload.heading, 
+                                payload.scan_angle, 
                                 payload.scan_dist
-                            ),
-                            None => eprintln!("Bad packet: {:?}", raw.trim()),
+                            );
                         }
+                        None => eprintln!("⚠️ Malformed payload from {}: '{}'", src, raw_str.trim()),
                     }
-                    Err(_) => eprintln!("Non-UTF8 packet from {}", src),
+                } else {
+                    eprintln!("⚠️ Received non-UTF8 packet from {}", src);
                 }
             }
-            Err(e) => eprintln!("Socket error: {}", e),
+            Err(e) => eprintln!("🛑 Socket receive error: {}", e),
         }
     }
 }
