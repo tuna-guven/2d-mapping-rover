@@ -1,6 +1,10 @@
 use std::str;
 use tokio::net::UdpSocket;
 
+// grid modülünü içeri aktarıyoruz
+mod grid;
+use grid::OccupancyGrid;
+
 #[derive(Debug)]
 struct SlamPayload {
     base_x: f32,
@@ -41,6 +45,8 @@ async fn main() -> std::io::Result<()> {
 
     println!("✅ Listening for high-speed rover telemetry on UDP port 4210...");
 
+    // Haritamızı (Grid) döngüden önce başlatıyoruz
+    let mut map = OccupancyGrid::new();
     let mut buf = [0u8; 1024];
 
     loop {
@@ -49,14 +55,20 @@ async fn main() -> std::io::Result<()> {
                 if let Ok(raw_str) = str::from_utf8(&buf[..len]) {
                     match parse_payload(raw_str) {
                         Some(payload) => {
+                            // 1. Sensörün mutlak açısını bul (Aracın yönü + Sensörün yönü) ve radyana çevir
+                            let global_angle_rad = (payload.heading + payload.scan_angle).to_radians();
+                            
+                            // 2. Trigonometri ile çarpma noktasının Global X ve Y koordinatlarını hesapla
+                            let ping_global_x = payload.base_x + (payload.scan_dist * global_angle_rad.cos());
+                            let ping_global_y = payload.base_y + (payload.scan_dist * global_angle_rad.sin());
+
+                            // 3. Haritayı güncelliyoruz (Ray-casting)
+                            map.process_ping(payload.base_x, payload.base_y, ping_global_x, ping_global_y);
+
                             println!(
-                                "[{}] x: {}, y: {}, heading: {}, angle: {}, dist: {}", 
+                                "[{}] Paket işlendi! Grid'deki bilinen hücre sayısı: {}", 
                                 src, 
-                                payload.base_x, 
-                                payload.base_y, 
-                                payload.heading, 
-                                payload.scan_angle, 
-                                payload.scan_dist
+                                map.cells.len()
                             );
                         }
                         None => eprintln!("⚠️ Malformed payload from {}: '{}'", src, raw_str.trim()),
