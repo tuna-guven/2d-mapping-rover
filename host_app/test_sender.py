@@ -1,19 +1,27 @@
 import socket
 import time
 
-# UDP soketi oluşturuyoruz
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-server_address = ('127.0.0.1', 4210) # Rust sunucumuzun adresi ve portu
+server_address = ('127.0.0.1', 4210)
 
-# Göndereceğimiz sahte veri formatı: base_x, base_y, heading, scan_angle, scan_dist
-# Örnek: Araç (0,0) konumunda, 0 derece yöne bakıyor. Sensör 45 derece açıyla 100 cm ötede bir engel gördü.
-mock_data = b"0.0, 0.0, 0.0, 45.0, 100.0"
+angle = -60.0
+direction = 1.0  # 1 for increasing angle, -1 for decreasing
+sweep_speed = 1.0 # Degrees per tick
 
-print(f"Rover simüle ediliyor. Veri gönderiliyor: {mock_data.decode()}")
+print("📡 Starting Radar Sweep Simulation (-60° to +60°)...")
 
-# Veriyi 3 kere peş peşe gönderelim ki grid güncellensin
-for i in range(3):
-    sock.sendto(mock_data, server_address)
-    time.sleep(0.1)
+while True:
+    # base_x=0, base_y=0, heading=0, scan_angle=angle, max_dist=200
+    # max_dist is 200cm so the ray travels far enough to hit our blue hourglass
+    payload = f"0.0, 0.0, 0.0, {angle:.1f}, 200.0".encode('utf-8')
+    sock.sendto(payload, server_address)
 
-print("Veri gönderimi tamamlandı.")
+    # Mechanical sweep logic
+    angle += (direction * sweep_speed)
+    if angle >= 60.0:
+        direction = -1.0
+    elif angle <= -60.0:
+        direction = 1.0
+
+    # 30Hz update rate
+    time.sleep(0.05)
