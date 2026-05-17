@@ -1,53 +1,55 @@
-# 2D Topographical Radar/Scanner
+# Autonomous 2D SLAM Rover
 
-This repository contains the source code, hardware specifications, and documentation for a 2D Topographical Radar/Scanner. This project was developed by Group 10 for the Embedded Systems Course Project at Muğla Sıtkı Koçman University.
+A high-performance, fully autonomous 2D SLAM (Simultaneous Localization and Mapping) simulated rover built in Rust. This project implements a complete autonomous navigation stack from scratch, allowing a simulated agent to explore unknown environments, identify frontiers, and navigate complex geometries using a custom-built Engine Control Unit (ECU) and A* Pathfinding.
 
-## Project Overview
+Designed with native thread isolation and strict event-loop management, this architecture guarantees stable UI performance.
 
-The core objective is to design an autonomous unit that sweeps an environment to capture distance data and generates a live 2D Cartesian map on a host PC. 
+## Key Features
 
-The system relies on a software-driven architecture, prioritizing sophisticated software algorithms and data processing over complex mechanical assemblies. By utilizing digital signal processing, the system is designed to handle physical inaccuracies such as multipath acoustic interference. This is a full-stack embedded systems project that covers hardware interfacing, firmware logic, serial communication protocols, and host-side UI rendering.
+* **Autonomous State Machine (ECU):** A dedicated background thread acts as the rover's brain, operating at 20Hz. It seamlessly transitions between `THINK` (A* path planning and frontier scoring) and `DRIVE` (kinematic translation) states.
+* **Frontier-Based Exploration:** Mathematically identifies the "shadow line" between known free space and the unknown void. Frontiers are scored by distance and cluster size to prioritize meaningful exploration and prevent the rover from fixating on dead-end fragments.
+* **Fallback Navigation Engine:** Automatically detects unreachable frontiers (e.g., blocked by the rover's inflation radius or tight corners) and re-routes to the next best target, preventing logic deadlocks.
+* **Dynamic Environment Swapping:** Hot-swap between multiple test tracks (Hourglass, Rooms, Pillars) on the fly without recompiling.
+* **Flood-Fill Safe Spawning:** Uses a Breadth-First Search (BFS) to map the interior of any loaded environment, guaranteeing the rover instantly teleports to a mathematically collision-free coordinate when reset.
 
-## Hardware Architecture
+## How It Works
 
-The hardware stack centers around an autonomous scanning unit equipped with an ultrasonic sensor and a central microcontroller. 
+To prevent lockups and UI deadlocks, the application completely bypasses heavy async runtimes (like Tokio) in favor of a strictly decoupled, native `std::thread` architecture:
 
-* **Microcontroller (Brain):** An Arduino Nano operates at 16MHz to handle real-time peripheral control.
-* **Actuator:** A Nema 17 stepper motor paired with an A4988 driver. The microcontroller interfaces with the driver via STEP and DIR pins. The motor requires 200 steps to complete a full 360-degree rotation, translating to 1.8 degrees per step.
-* **Sensor:** An HC-SR04 Ultrasonic sensor is mounted directly to the motor shaft. It emits a 40kHz acoustic pulse to time the reflection and interfaces with the microcontroller via TRIG (Output) and ECHO (Input) pins.
+1. **Thread 1: UI Event Loop (The Face)**
+   * Built with `eframe`/`egui`.
+   * Strictly capped at 30 FPS (`ctx.request_repaint_after`) to give the OS graphics pipeline time to breathe.
+   * Holds the master `try_lock` for rendering. If the background threads are busy, it gracefully drops a frame rather than freezing the application.
 
-## Firmware Implementation
+2. **Thread 2: Sensor Input (The Eyes)**
+   * A lightweight, headless UDP receiver bound to `0.0.0.0:4210`.
+   * Processes incoming CSV telemetry payloads (`scan_angle`, `scan_dist`) from a Python fuzzer script.
+   * Utilizes **Bresenham's Line Algorithm** for high-performance raycasting to simulate physical ultrasonic sensor beam physics and update the occupancy grid in real-time.
 
-The firmware is written in non-blocking C++ to ensure real-time responsiveness.
+3. **Thread 3: Autonomous ECU (The Brain)**
+   * Operates entirely on isolated physical CPU cores.
+   * **State: THINK** - Clones the current map into RAM, runs O(N) array calculations to find the closest reachable frontier, and calculates an **A*** path around inflated obstacle boundaries.
+   * **State: DRIVE** - Calculates the `atan2` heading to the next node and performs kinematic translation at a set speed, dynamically pulling the sensor cone through the fog of war.
 
-* **Hardware Timers:** Standard `delay()` functions pause the CPU, which causes motor stuttering and missed sensor readings. Instead, the firmware utilizes hardware timers (Timer1) or `millis()` to continuously pulse the A4988 driver in the background.
-* **Interrupt-Driven Sensing:** * A 10µs pulse is sent to the TRIG pin.
-  * An external interrupt (e.g., INT0) is attached to the ECHO pin.
-  * A timer starts on the rising edge of the echo and stops on the falling edge.
-* **Distance Calculation:** Distance is calculated using the formula: d = (Time * 0.0343) / 2.
-* **Telemetry:** Data is transmitted to the host via UART at a 115200 baud rate, formatted exactly as `angle, distance\n`.
+## Modular Structure
 
-## Data Pipeline & Coordinate Mathematics
+The codebase is modularized for maintainability and scalability:
 
-The HC-SR04 sensor outputs data in Polar Coordinates (r, theta). To render this data on a 2D screen, the host application converts the polar data into Cartesian Coordinates (x, y) relative to the scanner's center (0,0).
+* `src/main.rs`: Thread orchestration, state synchronization (`Arc<Mutex<T>>`), and application entry point.
+* `src/app.rs`: Immediate-mode UI dashboard, handling live rendering, geometry scaling, and map selection controls.
+* `src/grid.rs`: The core mathematical engine containing the `OccupancyGrid`, A* implementation, Bresenham raycasting, and boundary inflation logic.
+* `src/maps.rs`: The environment generation facility, housing various test tracks (Rooms, Hourglass, Pillars) used to stress-test the navigation logic.
+* `src/network.rs`: UDP parsing layer that extracts payload data from the simulated sensor array.
 
-The conversion relies on the following mathematical operations:
-1.  Convert the stepper motor's degree angle to radians: Radians = theta * (pi / 180).
-2.  Calculate the X coordinate: x = r * cos(Radians).
-3.  Calculate the Y coordinate: y = r * sin(Radians).
+## Getting Started
 
-## Host Application
+### Prerequisites
+* Rust toolchain (`cargo`, `rustc`)
+* Linux dependencies for `eframe` (if running on Wayland/X11)
+* A telemetry fuzzer (e.g., `test_sender.py`) sending CSV packets to `0.0.0.0:4210`.
 
-The host application is developed in Python. 
+### Running the System
+Because the A* algorithm and geometry tessellation are mathematically heavy, you **must** run this project in release mode. Compiler optimizations will drastically reduce pathfinding calculation times from seconds to sub-milliseconds.
 
-* **Data Ingestion:** The script uses the `pyserial` library to parse the high-speed CSV telemetry stream coming from the microcontroller.
-* **Digital Filtering:** Ultrasonic sensors often report false spikes, or "ghosts," due to acoustic reflections off angled walls. To mitigate this, the firmware takes three rapid readings per step angle. The Python script then applies a median filter by sorting the array of readings and selecting the middle value, which mathematically eliminates outlier spikes without skewing the underlying data.
-* **Rendering:** The processed (x, y) coordinates are plotted in real-time utilizing either `matplotlib` or `pygame`.
-
-## Advanced Features Roadmap
-
-To elevate the system capabilities beyond basic point-cloud mapping, the following features are planned for implementation:
-
-* **Object Clustering (DBSCAN):** An algorithm to group tightly packed coordinate points together, allowing the system to identify solid objects rather than a scattered point cloud.
-* **Bounding Boxes:** Upon identifying a valid cluster, the software will calculate the minimum and maximum Cartesian bounds and render a distinct box around the obstacle.
-* **Sweep Fading:** Older data points will slowly fade in opacity on the user interface. This ensures that moving objects leave a visual trail while preventing permanent screen clutter.
+```bash
+cargo run --release
