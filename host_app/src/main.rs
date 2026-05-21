@@ -2,8 +2,10 @@ use eframe::egui;
 use std::error::Error;
 use std::str;
 use std::sync::{Arc, Mutex};
-use std::net::UdpSocket;
 use std::thread;
+use std::io::{BufRead, BufReader};
+use std::time::Duration;
+
 
 mod network;
 mod maps;
@@ -23,28 +25,48 @@ fn main() -> Result<(), Box<dyn Error>> {
     let shared_grid = Arc::new(Mutex::new(OccupancyGrid::new(ground_truth)));
     let grid_for_udp = shared_grid.clone();
 
-    // THREAD 2: Gözler (Python Köprüsünden UDP dinler)
+    // THREAD 2: Gözler (Doğrudan USB Seri Portundan Okur)
     thread::spawn(move || {
-        let socket = UdpSocket::bind("0.0.0.0:4210").expect("Failed to bind UDP");
-        let mut buf = [0u8; 1024];
-        
-        loop {
-            if let Ok((len, _)) = socket.recv_from(&mut buf) {
-                if let Ok(raw_str) = str::from_utf8(&buf[..len]) {
-                    if let Some(payload) = parse_payload(raw_str) {
-                        if let Ok(mut map) = grid_for_udp.lock() {
-                            // 1. Radar masada sabit, konumu hep (0,0)
-                            map.pose.0 = 0.0;
-                            map.pose.1 = 0.0;
-                            
-                            // 2. Ekrandaki sarı üçgenin yönünü donanımın gerçek açısına eşitle
-                            map.pose.2 = payload.scan_angle; 
+        // Arkadaşının Linux portu. Sen Windows'ta test ederken burayı "COM9" yapmalısın.
+        let port_name = "/dev/ttyUSB0"; 
+        let baud_rate = 115200;
 
-                            // 3. Veriyi haritaya işle (Robot şasesi sabit olduğu için heading 0.0)
-                            map.process_ping(0.0, 0.0, 0.0, payload.scan_angle, payload.scan_dist);
-                        }
-                    } 
-                } 
+        let port_result = serialport::new(port_name, baud_rate)
+            .timeout(Duration::from_millis(10))
+            .open();
+
+        match port_result {
+            Ok(port) => {
+                println!("✅ Seri port başarıyla açıldı: {}", port_name);
+                let mut reader = BufReader::new(port);
+                let mut line = String::new();
+                
+                loop {
+                    line.clear();
+                    // Satır satır (newline karakterine kadar) Arduino'dan oku
+                    if let Ok(_) = reader.read_line(&mut line) {
+                        let raw_str = line.trim();
+                        
+                        // Eski payload parser'a gönder
+                        if let Some(payload) = parse_payload(raw_str) {
+                            if let Ok(mut map) = grid_for_udp.lock() {
+                                // 1. Radar masada sabit, konumu hep (0,0)
+                                map.pose.0 = 0.0;
+                                map.pose.1 = 0.0;
+                                
+                                // 2. Ekrandaki sarı üçgenin yönünü donanımın gerçek açısına eşitle
+                                map.pose.2 = payload.scan_angle; 
+
+                                // 3. Veriyi haritaya işle
+                                map.process_ping(0.0, 0.0, 0.0, payload.scan_angle, payload.scan_dist);
+                            }
+                        } 
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Seri port açılamadı '{}'. Hata: {}", port_name, e);
+                eprintln!("Linux kullanıyorsanız porta izin verdiğinizden emin olun: sudo chmod a+rw {}", port_name);
             }
         }
     });
