@@ -173,29 +173,32 @@ impl OccupancyGrid {
     }
 
     pub fn process_ping(&mut self, base_x: f32, base_y: f32, heading: f32, scan_angle: f32, max_dist: f32) {
-        // Hatalı veya uç değerleri engelle
-        if max_dist <= 2.0 || max_dist >= 300.0 { return; }
-
-        // Açıyı radyana çevirerek trigonometrik x, y konumunu bul
+        let safe_dist = max_dist.clamp(0.0, 250.0);
         let global_angle_rad = (heading + scan_angle).to_radians();
-        
-        // Gelen mesafeyi harita ölçeğine göre çarp (Hücre koordinatı hesabı)
-        let ping_max_x = base_x + (max_dist * global_angle_rad.cos());
-        let ping_max_y = base_y + (max_dist * global_angle_rad.sin());
+        let ping_max_x = base_x + (safe_dist * global_angle_rad.cos());
+        let ping_max_y = base_y + (safe_dist * global_angle_rad.sin());
 
         let start_idx = Self::world_to_grid(base_x, base_y);
         let end_idx = Self::world_to_grid(ping_max_x, ping_max_y);
-        
-        // Sensör ile engel arasındaki görünmeyen ışık hattını çıkar
         let ray_cells = bresenham_line(start_idx.0, start_idx.1, end_idx.0, end_idx.1);
 
-        for (i, &cell) in ray_cells.iter().enumerate() {
-            if i == ray_cells.len() - 1 {
-                // Işının bittiği yer donanımın gördüğü GERÇEK ENGELDİR (KIRMIZI)
-                self.update_cell(cell, L_OCC); 
+        for &cell in &ray_cells {
+            let mut hit_wall = false;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    if self.ground_truth.contains(&(cell.0 + dx, cell.1 + dy)) {
+                        hit_wall = true;
+                        break;
+                    }
+                }
+                if hit_wall { break; }
+            }
+
+            if hit_wall {
+                self.update_cell(cell, L_OCC);
+                break;
             } else {
-                // Aradaki boşluklar ses dalgasının rahatça geçtiği temiz havadır (YEŞİL)
-                self.update_cell(cell, L_FREE); 
+                self.update_cell(cell, L_FREE);
             }
         }
     }
